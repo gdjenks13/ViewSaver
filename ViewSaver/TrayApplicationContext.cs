@@ -16,6 +16,7 @@ namespace ViewSaver
         private readonly ProfileManager _profileManager;
         private readonly HiddenForm _hiddenForm;
         private HotkeyManager? _hotkeyManager;
+        private bool _isApplying;
 
         public TrayApplicationContext()
         {
@@ -188,7 +189,7 @@ namespace ViewSaver
         {
             MessageBox.Show(
                 "ViewSaver - Monitor Profile Manager\n\n" +
-                "Version 1.0.0\n\n" +
+                $"Version {Application.ProductVersion.Split('+')[0]}\n\n" +
                 "Save and quickly switch between different monitor configurations.",
                 "About ViewSaver",
                 MessageBoxButtons.OK,
@@ -207,21 +208,44 @@ namespace ViewSaver
 
         private void ApplyProfileWithNotification(string profileId)
         {
+            // Defer until the tray menu has fully closed and released mouse capture; changing the
+            // display topology while the menu is still tearing down is unreliable.
+            if (_hiddenForm.IsHandleCreated)
+            {
+                _hiddenForm.BeginInvoke(() => ApplyProfileNow(profileId));
+            }
+            else
+            {
+                ApplyProfileNow(profileId);
+            }
+        }
+
+        private void ApplyProfileNow(string profileId)
+        {
+            if (_isApplying) return; // ignore double-clicks / repeated hotkeys while switching
             var profile = _profileManager.GetProfile(profileId);
             if (profile == null) return;
 
-            bool success = _profileManager.ApplyProfile(profileId);
-
-            if (_profileManager.Settings.ShowNotifications)
+            _isApplying = true;
+            try
             {
-                if (success)
+                var result = _profileManager.ApplyProfile(profileId);
+
+                if (!result.Success)
                 {
-                    ShowBalloonTip("Profile Applied", $"Display configuration '{profile.Name}' has been applied.", ToolTipIcon.Info);
+                    // Always surface failures, even with notifications off, so they never fail silently.
+                    ShowBalloonTip("Profile Error", $"Failed to apply '{profile.Name}': {result.Message}", ToolTipIcon.Error);
                 }
-                else
+                else if (_profileManager.Settings.ShowNotifications)
                 {
-                    ShowBalloonTip("Profile Error", $"Failed to apply display configuration '{profile.Name}'.", ToolTipIcon.Error);
+                    var text = $"Display configuration '{profile.Name}' has been applied.";
+                    if (!string.IsNullOrEmpty(result.Message)) text += " " + result.Message;
+                    ShowBalloonTip("Profile Applied", text, ToolTipIcon.Info);
                 }
+            }
+            finally
+            {
+                _isApplying = false;
             }
         }
 
@@ -257,7 +281,9 @@ namespace ViewSaver
 
         private void ShowBalloonTip(string title, string text, ToolTipIcon icon)
         {
-            _trayIcon.ShowBalloonTip(3000, title, text, icon);
+            // Windows truncates balloon text beyond 255 characters.
+            if (text.Length > 255) text = text[..252] + "...";
+            _trayIcon.ShowBalloonTip(5000, title, text, icon);
         }
 
         private void ExitApplication()

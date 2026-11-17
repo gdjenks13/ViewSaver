@@ -16,7 +16,7 @@ ViewSaver is a lightweight system tray application that lets you save your curre
 ## Requirements
 
 - Windows 10 or Windows 11
-- [.NET 8.0 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)
+- [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)
 
 ## Installation
 
@@ -64,8 +64,8 @@ ViewSaver is a lightweight system tray application that lets you save your curre
 
 ### Prerequisites
 
-- Visual Studio 2022 or later
-- .NET 8.0 SDK
+- Visual Studio 2026 (or VS Code / any editor)
+- .NET 10 SDK
 
 ### Build Steps
 
@@ -75,7 +75,7 @@ dotnet restore
 dotnet build --configuration Release
 ```
 
-The output will be in `ViewSaver\bin\Release\net8.0-windows\`
+The output will be in `ViewSaver\bin\Release\net10.0-windows\`
 
 ## File Locations
 
@@ -84,7 +84,8 @@ Profiles and settings are stored in:
 ```
 %APPDATA%\ViewSaver\
 ├── profiles.json
-└── settings.json
+├── settings.json
+└── viewsaver.log
 ```
 
 ## Troubleshooting
@@ -97,8 +98,10 @@ Profiles and settings are stored in:
 
 ### Profile not applying correctly
 
-- Update the profile after making changes in Windows Display Settings
-- Some display configurations may not be restorable if monitors are disconnected
+- The failure notification now includes the reason; full details are written to `%APPDATA%\ViewSaver\viewsaver.log`
+- Profiles are matched to your GPU and monitors by hardware path, so reboots, driver updates, or an additional adapter (e.g. an enabled integrated GPU) no longer break them
+- If a monitor in the profile is disconnected, the profile cannot be applied until it is reconnected
+- Re-saving a profile with "Update" stores the latest identifiers and is recommended after hardware changes
 
 ### Application not starting with Windows
 

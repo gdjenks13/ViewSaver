@@ -68,6 +68,12 @@ namespace ViewSaver.Models
         public uint TargetStatusFlags { get; set; }
 
         public uint Flags { get; set; }
+
+        // Stable identifiers used to re-map adapter LUIDs / target IDs, which change
+        // across reboots, driver updates and when other GPUs (e.g. an iGPU) appear.
+        public string? SourceAdapterPath { get; set; }
+        public string? TargetAdapterPath { get; set; }
+        public string? TargetDevicePath { get; set; }
     }
 
     public class ModeInfoData

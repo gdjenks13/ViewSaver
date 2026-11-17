@@ -51,8 +51,11 @@ namespace ViewSaver.Services
                     _profiles = JsonConvert.DeserializeObject<List<DisplayProfile>>(json) ?? new List<DisplayProfile>();
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                // Keep a copy so a corrupt file isn't silently overwritten on the next save.
+                Logger.Error("Failed to load profiles; backing up the unreadable file", ex);
+                TryBackup(_profilesPath);
                 _profiles = new List<DisplayProfile>();
             }
         }
@@ -62,7 +65,7 @@ namespace ViewSaver.Services
             try
             {
                 var json = JsonConvert.SerializeObject(_profiles, Formatting.Indented);
-                File.WriteAllText(_profilesPath, json);
+                WriteAtomic(_profilesPath, json);
             }
             catch (Exception ex)
             {
@@ -80,8 +83,10 @@ namespace ViewSaver.Services
                     _settings = JsonConvert.DeserializeObject<AppSettings>(json) ?? new AppSettings();
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Logger.Error("Failed to load settings; using defaults", ex);
+                TryBackup(_settingsPath);
                 _settings = new AppSettings();
             }
         }
@@ -91,7 +96,7 @@ namespace ViewSaver.Services
             try
             {
                 var json = JsonConvert.SerializeObject(_settings, Formatting.Indented);
-                File.WriteAllText(_settingsPath, json);
+                WriteAtomic(_settingsPath, json);
                 SettingsChanged?.Invoke(this, EventArgs.Empty);
             }
             catch (Exception ex)
@@ -168,15 +173,39 @@ namespace ViewSaver.Services
             ProfilesChanged?.Invoke(this, EventArgs.Empty);
         }
 
-        public bool ApplyProfile(string profileId)
+        public ApplyResult ApplyProfile(string profileId)
         {
             var profile = _profiles.FirstOrDefault(p => p.Id == profileId);
-            if (profile == null) return false;
+            if (profile == null) return ApplyResult.Fail("Profile not found.");
 
-            _settings.LastSelectedProfileId = profileId;
-            SaveSettings();
+            var result = _displayService.ApplyProfile(profile);
+            if (result.Success)
+            {
+                _settings.LastSelectedProfileId = profileId;
+                SaveSettings();
+            }
+            return result;
+        }
 
-            return _displayService.ApplyProfile(profile);
+        private static void WriteAtomic(string path, string contents)
+        {
+            // Write to a temp file and swap it in so a crash mid-write can't truncate the real file.
+            var tempPath = path + ".tmp";
+            File.WriteAllText(tempPath, contents);
+            File.Move(tempPath, path, overwrite: true);
+        }
+
+        private static void TryBackup(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                    File.Copy(path, $"{path}.corrupt-{DateTime.Now:yyyyMMddHHmmss}", overwrite: true);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Could not back up {path}", ex);
+            }
         }
 
         public DisplayProfile? GetProfile(string profileId)

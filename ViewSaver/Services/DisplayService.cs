@@ -3,13 +3,23 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using ViewSaver.Models;
-using ViewSaver.Native;
 using static ViewSaver.Native.NativeMethods;
 
 namespace ViewSaver.Services
 {
+    /// <summary>Outcome of applying a profile, with a user-facing reason on failure.</summary>
+    public sealed record ApplyResult(bool Success, string Message)
+    {
+        public static ApplyResult Ok(string message = "") => new(true, message);
+        public static ApplyResult Fail(string message) => new(false, message);
+    }
+
     public class DisplayService
     {
+        private const int MaxQueryAttempts = 5;
+
+        #region Capture
+
         public DisplayProfile CaptureCurrentConfiguration(string profileName = "Current")
         {
             var profile = new DisplayProfile
@@ -19,33 +29,25 @@ namespace ViewSaver.Services
                 ModifiedAt = DateTime.Now
             };
 
-            int result = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, out uint pathCount, out uint modeCount);
-            if (result != ERROR_SUCCESS)
+            if (!TryQueryConfig(QDC_ONLY_ACTIVE_PATHS, out var paths, out var modes, out int error))
             {
-                throw new Exception($"GetDisplayConfigBufferSizes failed with error {result}");
+                throw new InvalidOperationException($"QueryDisplayConfig failed: {DescribeError(error)}");
             }
 
-            var paths = new DISPLAYCONFIG_PATH_INFO[pathCount];
-            var modes = new DISPLAYCONFIG_MODE_INFO[modeCount];
-
-            result = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero);
-            if (result != ERROR_SUCCESS)
-            {
-                throw new Exception($"QueryDisplayConfig failed with error {result}");
-            }
-
+            var adapterPathCache = new Dictionary<LUID, string>();
             profile.RawConfiguration = new DisplayConfigurationData();
 
-            for (int i = 0; i < pathCount; i++)
+            foreach (var path in paths)
             {
-                var path = paths[i];
-                var pathData = new PathInfoData
+                var targetName = GetTargetName(path.targetInfo.adapterId, path.targetInfo.id);
+
+                profile.RawConfiguration.Paths.Add(new PathInfoData
                 {
-                    SourceAdapterId = ((long)path.sourceInfo.adapterId.HighPart << 32) | path.sourceInfo.adapterId.LowPart,
+                    SourceAdapterId = LuidToLong(path.sourceInfo.adapterId),
                     SourceId = path.sourceInfo.id,
                     SourceModeInfoIdx = path.sourceInfo.modeInfoIdx,
                     SourceStatusFlags = path.sourceInfo.statusFlags,
-                    TargetAdapterId = ((long)path.targetInfo.adapterId.HighPart << 32) | path.targetInfo.adapterId.LowPart,
+                    TargetAdapterId = LuidToLong(path.targetInfo.adapterId),
                     TargetId = path.targetInfo.id,
                     TargetModeInfoIdx = path.targetInfo.modeInfoIdx,
                     OutputTechnology = (uint)path.targetInfo.outputTechnology,
@@ -56,64 +58,64 @@ namespace ViewSaver.Services
                     ScanLineOrdering = (uint)path.targetInfo.scanLineOrdering,
                     TargetAvailable = path.targetInfo.targetAvailable,
                     TargetStatusFlags = path.targetInfo.statusFlags,
-                    Flags = path.flags
-                };
-                profile.RawConfiguration.Paths.Add(pathData);
+                    Flags = path.flags,
+                    SourceAdapterPath = GetAdapterPath(path.sourceInfo.adapterId, adapterPathCache),
+                    TargetAdapterPath = GetAdapterPath(path.targetInfo.adapterId, adapterPathCache),
+                    TargetDevicePath = targetName?.monitorDevicePath
+                });
             }
 
-            for (int i = 0; i < modeCount; i++)
+            foreach (var mode in modes)
             {
-                var mode = modes[i];
                 var modeData = new ModeInfoData
                 {
                     InfoType = (uint)mode.infoType,
                     Id = mode.id,
-                    AdapterId = ((long)mode.adapterId.HighPart << 32) | mode.adapterId.LowPart
+                    AdapterId = LuidToLong(mode.adapterId)
                 };
 
                 if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE.DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
                 {
-                    modeData.Width = mode.modeInfo.sourceMode.width;
-                    modeData.Height = mode.modeInfo.sourceMode.height;
-                    modeData.PixelFormat = (uint)mode.modeInfo.sourceMode.pixelFormat;
-                    modeData.PositionX = mode.modeInfo.sourceMode.position.x;
-                    modeData.PositionY = mode.modeInfo.sourceMode.position.y;
+                    var src = mode.modeInfo.sourceMode;
+                    modeData.Width = src.width;
+                    modeData.Height = src.height;
+                    modeData.PixelFormat = (uint)src.pixelFormat;
+                    modeData.PositionX = src.position.x;
+                    modeData.PositionY = src.position.y;
                 }
                 else if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE.DISPLAYCONFIG_MODE_INFO_TYPE_TARGET)
                 {
-                    modeData.PixelRate = mode.modeInfo.targetMode.targetVideoSignalInfo.pixelRate;
-                    modeData.HSyncNumerator = mode.modeInfo.targetMode.targetVideoSignalInfo.hSyncFreq.Numerator;
-                    modeData.HSyncDenominator = mode.modeInfo.targetMode.targetVideoSignalInfo.hSyncFreq.Denominator;
-                    modeData.VSyncNumerator = mode.modeInfo.targetMode.targetVideoSignalInfo.vSyncFreq.Numerator;
-                    modeData.VSyncDenominator = mode.modeInfo.targetMode.targetVideoSignalInfo.vSyncFreq.Denominator;
-                    modeData.ActiveSizeWidth = mode.modeInfo.targetMode.targetVideoSignalInfo.activeSize.cx;
-                    modeData.ActiveSizeHeight = mode.modeInfo.targetMode.targetVideoSignalInfo.activeSize.cy;
-                    modeData.TotalSizeWidth = mode.modeInfo.targetMode.targetVideoSignalInfo.totalSize.cx;
-                    modeData.TotalSizeHeight = mode.modeInfo.targetMode.targetVideoSignalInfo.totalSize.cy;
-                    modeData.VideoStandard = mode.modeInfo.targetMode.targetVideoSignalInfo.videoStandard;
-                    modeData.TargetScanLineOrdering = (uint)mode.modeInfo.targetMode.targetVideoSignalInfo.scanLineOrdering;
+                    var sig = mode.modeInfo.targetMode.targetVideoSignalInfo;
+                    modeData.PixelRate = sig.pixelRate;
+                    modeData.HSyncNumerator = sig.hSyncFreq.Numerator;
+                    modeData.HSyncDenominator = sig.hSyncFreq.Denominator;
+                    modeData.VSyncNumerator = sig.vSyncFreq.Numerator;
+                    modeData.VSyncDenominator = sig.vSyncFreq.Denominator;
+                    modeData.ActiveSizeWidth = sig.activeSize.cx;
+                    modeData.ActiveSizeHeight = sig.activeSize.cy;
+                    modeData.TotalSizeWidth = sig.totalSize.cx;
+                    modeData.TotalSizeHeight = sig.totalSize.cy;
+                    modeData.VideoStandard = sig.videoStandard;
+                    modeData.TargetScanLineOrdering = (uint)sig.scanLineOrdering;
                 }
 
                 profile.RawConfiguration.Modes.Add(modeData);
             }
 
-            var monitorConfigs = GetMonitorConfigurations(paths, modes, (int)pathCount, (int)modeCount);
-            profile.Monitors.AddRange(monitorConfigs);
-
+            profile.Monitors.AddRange(GetMonitorConfigurations(paths, modes, adapterPathCache));
+            Logger.Info($"Captured profile '{profileName}' with {paths.Length} path(s), {modes.Length} mode(s).");
             return profile;
         }
 
         private List<MonitorConfiguration> GetMonitorConfigurations(
             DISPLAYCONFIG_PATH_INFO[] paths,
             DISPLAYCONFIG_MODE_INFO[] modes,
-            int pathCount,
-            int modeCount)
+            Dictionary<LUID, string> adapterPathCache)
         {
             var monitors = new List<MonitorConfiguration>();
-
             var displayDevices = GetDisplayDevices();
 
-            for (int i = 0; i < pathCount; i++)
+            for (int i = 0; i < paths.Length; i++)
             {
                 var path = paths[i];
                 var config = new MonitorConfiguration
@@ -121,25 +123,16 @@ namespace ViewSaver.Services
                     SourceId = path.sourceInfo.id,
                     TargetId = path.targetInfo.id,
                     IsEnabled = (path.flags & DISPLAYCONFIG_PATH_ACTIVE) != 0,
-                    DisplayOrder = i
+                    DisplayOrder = i,
+                    FriendlyName = $"Display {i + 1}"
                 };
 
-                var targetName = new DISPLAYCONFIG_TARGET_DEVICE_NAME();
-                targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_TYPE.DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-                targetName.header.size = (uint)Marshal.SizeOf<DISPLAYCONFIG_TARGET_DEVICE_NAME>();
-                targetName.header.adapterId = path.targetInfo.adapterId;
-                targetName.header.id = path.targetInfo.id;
-
-                if (DisplayConfigGetDeviceInfo(ref targetName) == ERROR_SUCCESS)
+                var targetName = GetTargetName(path.targetInfo.adapterId, path.targetInfo.id);
+                if (targetName is { } tn)
                 {
-                    config.FriendlyName = string.IsNullOrEmpty(targetName.monitorFriendlyDeviceName)
-                        ? $"Display {i + 1}"
-                        : targetName.monitorFriendlyDeviceName;
-                    config.DevicePath = targetName.monitorDevicePath ?? string.Empty;
-                }
-                else
-                {
-                    config.FriendlyName = $"Display {i + 1}";
+                    if (!string.IsNullOrEmpty(tn.monitorFriendlyDeviceName))
+                        config.FriendlyName = tn.monitorFriendlyDeviceName;
+                    config.DevicePath = tn.monitorDevicePath ?? string.Empty;
                 }
 
                 var sourceName = new DISPLAYCONFIG_SOURCE_DEVICE_NAME();
@@ -147,23 +140,14 @@ namespace ViewSaver.Services
                 sourceName.header.size = (uint)Marshal.SizeOf<DISPLAYCONFIG_SOURCE_DEVICE_NAME>();
                 sourceName.header.adapterId = path.sourceInfo.adapterId;
                 sourceName.header.id = path.sourceInfo.id;
-
                 if (DisplayConfigGetDeviceInfo(ref sourceName) == ERROR_SUCCESS)
                 {
-                    config.DeviceName = sourceName.viewGdiDeviceName ?? $"\\\\.\\DISPLAY{i + 1}";
+                    config.DeviceName = sourceName.viewGdiDeviceName ?? string.Empty;
                 }
 
-                var adapterName = new DISPLAYCONFIG_ADAPTER_NAME();
-                adapterName.header.type = DISPLAYCONFIG_DEVICE_INFO_TYPE.DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME;
-                adapterName.header.size = (uint)Marshal.SizeOf<DISPLAYCONFIG_ADAPTER_NAME>();
-                adapterName.header.adapterId = path.sourceInfo.adapterId;
+                config.AdapterPath = GetAdapterPath(path.sourceInfo.adapterId, adapterPathCache) ?? string.Empty;
 
-                if (DisplayConfigGetDeviceInfo(ref adapterName) == ERROR_SUCCESS)
-                {
-                    config.AdapterPath = adapterName.adapterDevicePath ?? string.Empty;
-                }
-
-                if (path.sourceInfo.modeInfoIdx < modeCount)
+                if (path.sourceInfo.modeInfoIdx < modes.Length)
                 {
                     var sourceMode = modes[path.sourceInfo.modeInfoIdx];
                     if (sourceMode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE.DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
@@ -175,275 +159,461 @@ namespace ViewSaver.Services
                     }
                 }
 
-                if (path.targetInfo.modeInfoIdx < modeCount)
+                if (path.targetInfo.modeInfoIdx < modes.Length &&
+                    modes[path.targetInfo.modeInfoIdx].infoType == DISPLAYCONFIG_MODE_INFO_TYPE.DISPLAYCONFIG_MODE_INFO_TYPE_TARGET)
                 {
-                    var targetMode = modes[path.targetInfo.modeInfoIdx];
-                    if (targetMode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE.DISPLAYCONFIG_MODE_INFO_TYPE_TARGET)
-                    {
-                        var vSync = targetMode.modeInfo.targetMode.targetVideoSignalInfo.vSyncFreq;
-                        if (vSync.Denominator > 0)
-                        {
-                            config.RefreshRate = (int)Math.Round((double)vSync.Numerator / vSync.Denominator);
-                        }
-                    }
+                    var vSync = modes[path.targetInfo.modeInfoIdx].modeInfo.targetMode.targetVideoSignalInfo.vSyncFreq;
+                    if (vSync.Denominator > 0)
+                        config.RefreshRate = (int)Math.Round((double)vSync.Numerator / vSync.Denominator);
                 }
-                else
+                else if (path.targetInfo.refreshRate.Denominator > 0)
                 {
-                    if (path.targetInfo.refreshRate.Denominator > 0)
-                    {
-                        config.RefreshRate = (int)Math.Round((double)path.targetInfo.refreshRate.Numerator / path.targetInfo.refreshRate.Denominator);
-                    }
+                    config.RefreshRate = (int)Math.Round((double)path.targetInfo.refreshRate.Numerator / path.targetInfo.refreshRate.Denominator);
                 }
 
-                config.Orientation = (int)path.targetInfo.rotation - 1; // IDENTITY is 1, we want 0-based
+                config.Orientation = Math.Max(0, (int)path.targetInfo.rotation - 1); // IDENTITY is 1, we want 0-based
+
+                // The primary display is always the one whose desktop origin is (0,0).
+                config.IsPrimary = config.IsEnabled && config.PositionX == 0 && config.PositionY == 0;
 
                 var device = displayDevices.FirstOrDefault(d => d.DeviceName == config.DeviceName);
                 if (device.DeviceName != null)
                 {
                     config.IsPrimary = (device.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0;
-                    config.IsEnabled = (device.StateFlags & DISPLAY_DEVICE_ACTIVE) != 0;
                 }
 
-                var devMode = new DEVMODE();
-                devMode.dmSize = (short)Marshal.SizeOf<DEVMODE>();
-                if (EnumDisplaySettings(config.DeviceName, ENUM_CURRENT_SETTINGS, ref devMode))
+                if (!string.IsNullOrEmpty(config.DeviceName))
                 {
-                    config.BitsPerPixel = devMode.dmBitsPerPel;
-                    if (config.RefreshRate == 0)
+                    var devMode = new DEVMODE { dmSize = (short)Marshal.SizeOf<DEVMODE>() };
+                    if (EnumDisplaySettings(config.DeviceName, ENUM_CURRENT_SETTINGS, ref devMode))
                     {
-                        config.RefreshRate = devMode.dmDisplayFrequency;
+                        config.BitsPerPixel = devMode.dmBitsPerPel;
+                        if (config.RefreshRate == 0)
+                            config.RefreshRate = devMode.dmDisplayFrequency;
                     }
                 }
 
                 config.ScalingPercent = 100;
-
                 monitors.Add(config);
             }
 
             return monitors;
         }
 
-        private List<DISPLAY_DEVICE> GetDisplayDevices()
+        private static List<DISPLAY_DEVICE> GetDisplayDevices()
         {
             var devices = new List<DISPLAY_DEVICE>();
-            uint deviceIndex = 0;
-
-            while (true)
+            for (uint index = 0; ; index++)
             {
-                var device = new DISPLAY_DEVICE();
-                device.cb = Marshal.SizeOf<DISPLAY_DEVICE>();
-
-                if (!EnumDisplayDevices(null, deviceIndex, ref device, 0))
+                var device = new DISPLAY_DEVICE { cb = Marshal.SizeOf<DISPLAY_DEVICE>() };
+                if (!EnumDisplayDevices(null, index, ref device, 0))
                     break;
 
                 if ((device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0)
-                {
                     devices.Add(device);
-                }
-
-                deviceIndex++;
             }
-
             return devices;
         }
 
-        public bool ApplyProfile(DisplayProfile profile)
+        #endregion
+
+        #region Apply
+
+        public ApplyResult ApplyProfile(DisplayProfile profile)
         {
-            if (profile.RawConfiguration == null || 
-                profile.RawConfiguration.Paths.Count == 0)
+            if (profile.RawConfiguration == null || profile.RawConfiguration.Paths.Count == 0)
             {
-                return false;
+                return Fail(profile, "The profile contains no display data. Re-save it with \"Update\".");
             }
 
             try
             {
-                int result = GetDisplayConfigBufferSizes(QDC_ALL_PATHS, out uint currentPathCount, out uint currentModeCount);
-                if (result != ERROR_SUCCESS) return false;
-
-                var currentPaths = new DISPLAYCONFIG_PATH_INFO[currentPathCount];
-                var currentModes = new DISPLAYCONFIG_MODE_INFO[currentModeCount];
-
-                result = QueryDisplayConfig(QDC_ALL_PATHS, ref currentPathCount, currentPaths, ref currentModeCount, currentModes, IntPtr.Zero);
-                if (result != ERROR_SUCCESS) return false;
-
-                var adapterMapping = BuildAdapterMapping(profile.RawConfiguration, currentPaths, (int)currentPathCount);
-
-                var paths = new DISPLAYCONFIG_PATH_INFO[profile.RawConfiguration.Paths.Count];
-                var modes = new DISPLAYCONFIG_MODE_INFO[profile.RawConfiguration.Modes.Count];
-
-                for (int i = 0; i < profile.RawConfiguration.Paths.Count; i++)
+                if (!TryQueryConfig(QDC_ALL_PATHS, out var currentPaths, out _, out int error))
                 {
-                    var pathData = profile.RawConfiguration.Paths[i];
-                    var path = new DISPLAYCONFIG_PATH_INFO();
-
-                    var sourceAdapterId = GetMappedAdapterId(pathData.SourceAdapterId, adapterMapping);
-                    var targetAdapterId = GetMappedAdapterId(pathData.TargetAdapterId, adapterMapping);
-
-                    path.sourceInfo.adapterId = sourceAdapterId;
-                    path.sourceInfo.id = pathData.SourceId;
-                    path.sourceInfo.modeInfoIdx = pathData.SourceModeInfoIdx;
-                    path.sourceInfo.statusFlags = pathData.SourceStatusFlags;
-
-                    path.targetInfo.adapterId = targetAdapterId;
-                    path.targetInfo.id = pathData.TargetId;
-                    path.targetInfo.modeInfoIdx = pathData.TargetModeInfoIdx;
-                    path.targetInfo.outputTechnology = (DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY)pathData.OutputTechnology;
-                    path.targetInfo.rotation = (DISPLAYCONFIG_ROTATION)pathData.Rotation;
-                    path.targetInfo.scaling = (DISPLAYCONFIG_SCALING)pathData.Scaling;
-                    path.targetInfo.refreshRate.Numerator = pathData.RefreshRateNumerator;
-                    path.targetInfo.refreshRate.Denominator = pathData.RefreshRateDenominator;
-                    path.targetInfo.scanLineOrdering = (DISPLAYCONFIG_SCANLINE_ORDERING)pathData.ScanLineOrdering;
-                    path.targetInfo.targetAvailable = pathData.TargetAvailable;
-                    path.targetInfo.statusFlags = pathData.TargetStatusFlags;
-
-                    path.flags = pathData.Flags;
-                    paths[i] = path;
+                    return Fail(profile, $"Could not read the current display configuration ({DescribeError(error)}).");
                 }
 
-                for (int i = 0; i < profile.RawConfiguration.Modes.Count; i++)
+                var snapshot = CurrentTopology.Build(currentPaths);
+                Logger.Info($"Applying '{profile.Name}'. Current adapters: {string.Join("; ", snapshot.AdapterPaths.Select(kv => $"{LuidToLong(kv.Value)}={kv.Key}"))}");
+
+                if (!TryBuildConfig(profile, snapshot, out var paths, out var modes, out string buildError))
                 {
-                    var modeData = profile.RawConfiguration.Modes[i];
-                    var mode = new DISPLAYCONFIG_MODE_INFO();
-
-                    var adapterId = GetMappedAdapterId(modeData.AdapterId, adapterMapping);
-
-                    mode.infoType = (DISPLAYCONFIG_MODE_INFO_TYPE)modeData.InfoType;
-                    mode.id = modeData.Id;
-                    mode.adapterId = adapterId;
-
-                    if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE.DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
-                    {
-                        mode.modeInfo.sourceMode.width = modeData.Width;
-                        mode.modeInfo.sourceMode.height = modeData.Height;
-                        mode.modeInfo.sourceMode.pixelFormat = (DISPLAYCONFIG_PIXELFORMAT)modeData.PixelFormat;
-                        mode.modeInfo.sourceMode.position.x = modeData.PositionX;
-                        mode.modeInfo.sourceMode.position.y = modeData.PositionY;
-                    }
-                    else if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE.DISPLAYCONFIG_MODE_INFO_TYPE_TARGET)
-                    {
-                        mode.modeInfo.targetMode.targetVideoSignalInfo.pixelRate = modeData.PixelRate;
-                        mode.modeInfo.targetMode.targetVideoSignalInfo.hSyncFreq.Numerator = modeData.HSyncNumerator;
-                        mode.modeInfo.targetMode.targetVideoSignalInfo.hSyncFreq.Denominator = modeData.HSyncDenominator;
-                        mode.modeInfo.targetMode.targetVideoSignalInfo.vSyncFreq.Numerator = modeData.VSyncNumerator;
-                        mode.modeInfo.targetMode.targetVideoSignalInfo.vSyncFreq.Denominator = modeData.VSyncDenominator;
-                        mode.modeInfo.targetMode.targetVideoSignalInfo.activeSize.cx = modeData.ActiveSizeWidth;
-                        mode.modeInfo.targetMode.targetVideoSignalInfo.activeSize.cy = modeData.ActiveSizeHeight;
-                        mode.modeInfo.targetMode.targetVideoSignalInfo.totalSize.cx = modeData.TotalSizeWidth;
-                        mode.modeInfo.targetMode.targetVideoSignalInfo.totalSize.cy = modeData.TotalSizeHeight;
-                        mode.modeInfo.targetMode.targetVideoSignalInfo.videoStandard = modeData.VideoStandard;
-                        mode.modeInfo.targetMode.targetVideoSignalInfo.scanLineOrdering = (DISPLAYCONFIG_SCANLINE_ORDERING)modeData.TargetScanLineOrdering;
-                    }
-
-                    modes[i] = mode;
+                    return Fail(profile, buildError);
                 }
 
-                uint flags = SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE;
-                result = SetDisplayConfig((uint)paths.Length, paths, (uint)modes.Length, modes, flags);
+                // Attempt 1: the exact saved configuration (resolution, refresh, position, orientation).
+                const uint fullFlags = SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE;
+                int result = SetDisplayConfig((uint)paths.Length, paths, (uint)modes.Length, modes, fullFlags);
+                if (result == ERROR_SUCCESS)
+                {
+                    Logger.Info($"Applied '{profile.Name}' using the full saved configuration.");
+                    return ApplyResult.Ok();
+                }
+                Logger.Warning($"Full apply of '{profile.Name}' failed: {DescribeError(result)}. Retrying with topology only.");
 
-                return result == ERROR_SUCCESS;
+                // Attempt 2: enable the right monitors and let Windows pick modes, then restore layout.
+                var topologyPaths = paths.Select(p =>
+                {
+                    p.sourceInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+                    p.targetInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+                    return p;
+                }).ToArray();
+
+                result = SetDisplayConfig((uint)topologyPaths.Length, topologyPaths, 0, null,
+                    SDC_APPLY | SDC_TOPOLOGY_SUPPLIED | SDC_ALLOW_PATH_ORDER_CHANGES);
+                if (result != ERROR_SUCCESS)
+                {
+                    return Fail(profile, $"Windows rejected the configuration ({DescribeError(result)}).");
+                }
+
+                if (TryRestoreLayout(modes, paths, out string layoutError))
+                {
+                    Logger.Info($"Applied '{profile.Name}' via topology + layout restore.");
+                    return ApplyResult.Ok();
+                }
+
+                Logger.Warning($"'{profile.Name}': monitors enabled but layout restore failed: {layoutError}");
+                return ApplyResult.Ok("Monitors were switched, but the exact resolution/position could not be restored. " +
+                                      "Adjust in Windows Display Settings and use \"Update\" to re-save the profile.");
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Logger.Error($"Unexpected error applying '{profile.Name}'", ex);
+                return ApplyResult.Fail($"Unexpected error: {ex.Message}");
+            }
+        }
+
+        private static ApplyResult Fail(DisplayProfile profile, string message)
+        {
+            Logger.Error($"Failed to apply '{profile.Name}': {message}");
+            return ApplyResult.Fail(message);
+        }
+
+        /// <summary>
+        /// Translates the saved paths/modes into ones valid for the current session. Adapter LUIDs are
+        /// regenerated every boot, so they are matched by adapter device path (stable), and monitors by
+        /// monitor device path, falling back to the old raw IDs only when nothing better is available.
+        /// </summary>
+        private static bool TryBuildConfig(
+            DisplayProfile profile,
+            CurrentTopology current,
+            out DISPLAYCONFIG_PATH_INFO[] paths,
+            out DISPLAYCONFIG_MODE_INFO[] modes,
+            out string error)
+        {
+            var raw = profile.RawConfiguration!;
+            paths = new DISPLAYCONFIG_PATH_INFO[raw.Paths.Count];
+            modes = new DISPLAYCONFIG_MODE_INFO[raw.Modes.Count];
+            var targetRemap = new Dictionary<(long adapter, uint target), uint>();
+            error = string.Empty;
+
+            // Older profiles don't store paths on PathInfoData; Monitors[i] was captured in the same order.
+            bool monitorsAligned = profile.Monitors.Count == raw.Paths.Count;
+            var adapterMap = new Dictionary<long, LUID>();
+
+            for (int i = 0; i < raw.Paths.Count; i++)
+            {
+                var p = raw.Paths[i];
+                var monitor = monitorsAligned ? profile.Monitors[i] : null;
+                string? sourceAdapterPath = p.SourceAdapterPath ?? monitor?.AdapterPath;
+                string? targetAdapterPath = p.TargetAdapterPath ?? (p.TargetAdapterId == p.SourceAdapterId ? sourceAdapterPath : null);
+                string? devicePath = p.TargetDevicePath ?? monitor?.DevicePath;
+                string label = monitor?.FriendlyName is { Length: > 0 } n ? n : $"Display {i + 1}";
+
+                // Monitor device path -> its current adapter + target id (handles port changes too).
+                if (!string.IsNullOrEmpty(devicePath) && current.Targets.TryGetValue(devicePath, out var target))
+                {
+                    adapterMap.TryAdd(p.TargetAdapterId, target.Adapter);
+                    targetRemap[(p.TargetAdapterId, p.TargetId)] = target.TargetId;
+                }
+                else if (!string.IsNullOrEmpty(devicePath) && (p.Flags & DISPLAYCONFIG_PATH_ACTIVE) != 0)
+                {
+                    error = $"Monitor \"{label}\" is not connected or is not detected by Windows.";
+                    return false;
+                }
+
+                if (!string.IsNullOrEmpty(sourceAdapterPath) && current.AdapterPaths.TryGetValue(sourceAdapterPath, out var srcLuid))
+                    adapterMap.TryAdd(p.SourceAdapterId, srcLuid);
+                if (!string.IsNullOrEmpty(targetAdapterPath) && current.AdapterPaths.TryGetValue(targetAdapterPath, out var tgtLuid))
+                    adapterMap.TryAdd(p.TargetAdapterId, tgtLuid);
+            }
+
+            // Last-resort mapping for profiles with no stored paths.
+            foreach (long saved in raw.Paths.SelectMany(p => new[] { p.SourceAdapterId, p.TargetAdapterId }).Distinct())
+            {
+                if (adapterMap.ContainsKey(saved)) continue;
+
+                var savedLuid = LongToLuid(saved);
+                if (current.AdapterPaths.ContainsValue(savedLuid))
+                {
+                    adapterMap[saved] = savedLuid; // same boot session, LUID still valid
+                }
+                else if (current.AdaptersWithMonitors.Count == 1)
+                {
+                    adapterMap[saved] = current.AdaptersWithMonitors.First();
+                }
+                else
+                {
+                    error = "The graphics adapter this profile was saved on could not be identified. " +
+                            "Apply the layout manually once, then use \"Update\" to re-save the profile.";
+                    return false;
+                }
+            }
+
+            LUID Map(long id) => adapterMap[id];
+            uint MapTarget(long adapter, uint id) => targetRemap.TryGetValue((adapter, id), out var t) ? t : id;
+
+            for (int i = 0; i < raw.Paths.Count; i++)
+            {
+                var d = raw.Paths[i];
+                var path = new DISPLAYCONFIG_PATH_INFO();
+                path.sourceInfo.adapterId = Map(d.SourceAdapterId);
+                path.sourceInfo.id = d.SourceId;
+                path.sourceInfo.modeInfoIdx = d.SourceModeInfoIdx;
+                path.sourceInfo.statusFlags = 0;
+
+                path.targetInfo.adapterId = Map(d.TargetAdapterId);
+                path.targetInfo.id = MapTarget(d.TargetAdapterId, d.TargetId);
+                path.targetInfo.modeInfoIdx = d.TargetModeInfoIdx;
+                path.targetInfo.outputTechnology = (DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY)d.OutputTechnology;
+                path.targetInfo.rotation = (DISPLAYCONFIG_ROTATION)d.Rotation;
+                path.targetInfo.scaling = (DISPLAYCONFIG_SCALING)d.Scaling;
+                path.targetInfo.refreshRate.Numerator = d.RefreshRateNumerator;
+                path.targetInfo.refreshRate.Denominator = d.RefreshRateDenominator;
+                path.targetInfo.scanLineOrdering = (DISPLAYCONFIG_SCANLINE_ORDERING)d.ScanLineOrdering;
+                path.targetInfo.targetAvailable = true;
+                path.targetInfo.statusFlags = 0;
+                path.flags = d.Flags;
+                paths[i] = path;
+            }
+
+            for (int i = 0; i < raw.Modes.Count; i++)
+            {
+                var d = raw.Modes[i];
+                var mode = new DISPLAYCONFIG_MODE_INFO
+                {
+                    infoType = (DISPLAYCONFIG_MODE_INFO_TYPE)d.InfoType,
+                    adapterId = adapterMap.TryGetValue(d.AdapterId, out var luid) ? luid : LongToLuid(d.AdapterId),
+                    id = d.Id
+                };
+
+                if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE.DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+                {
+                    mode.modeInfo.sourceMode.width = d.Width;
+                    mode.modeInfo.sourceMode.height = d.Height;
+                    mode.modeInfo.sourceMode.pixelFormat = (DISPLAYCONFIG_PIXELFORMAT)d.PixelFormat;
+                    mode.modeInfo.sourceMode.position.x = d.PositionX;
+                    mode.modeInfo.sourceMode.position.y = d.PositionY;
+                }
+                else if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE.DISPLAYCONFIG_MODE_INFO_TYPE_TARGET)
+                {
+                    mode.id = MapTarget(d.AdapterId, d.Id);
+                    ref var sig = ref mode.modeInfo.targetMode.targetVideoSignalInfo;
+                    sig.pixelRate = d.PixelRate;
+                    sig.hSyncFreq.Numerator = d.HSyncNumerator;
+                    sig.hSyncFreq.Denominator = d.HSyncDenominator;
+                    sig.vSyncFreq.Numerator = d.VSyncNumerator;
+                    sig.vSyncFreq.Denominator = d.VSyncDenominator;
+                    sig.activeSize.cx = d.ActiveSizeWidth;
+                    sig.activeSize.cy = d.ActiveSizeHeight;
+                    sig.totalSize.cx = d.TotalSizeWidth;
+                    sig.totalSize.cy = d.TotalSizeHeight;
+                    sig.videoStandard = d.VideoStandard;
+                    sig.scanLineOrdering = (DISPLAYCONFIG_SCANLINE_ORDERING)d.TargetScanLineOrdering;
+                }
+
+                modes[i] = mode;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// After a topology-only switch, re-apply the saved source resolution/position onto
+        /// whatever modes Windows chose, matching each active path by its target.
+        /// </summary>
+        private static bool TryRestoreLayout(
+            DISPLAYCONFIG_MODE_INFO[] savedModes,
+            DISPLAYCONFIG_PATH_INFO[] savedPaths,
+            out string error)
+        {
+            error = string.Empty;
+            if (!TryQueryConfig(QDC_ONLY_ACTIVE_PATHS, out var paths, out var modes, out int qerr))
+            {
+                error = DescribeError(qerr);
                 return false;
             }
+
+            bool changed = false;
+            foreach (var active in paths)
+            {
+                int savedIdx = Array.FindIndex(savedPaths, p =>
+                    p.targetInfo.adapterId.Equals(active.targetInfo.adapterId) && p.targetInfo.id == active.targetInfo.id);
+                if (savedIdx < 0) continue;
+
+                var saved = savedPaths[savedIdx];
+                if (saved.sourceInfo.modeInfoIdx >= savedModes.Length || active.sourceInfo.modeInfoIdx >= modes.Length)
+                    continue;
+
+                var savedSrc = savedModes[saved.sourceInfo.modeInfoIdx].modeInfo.sourceMode;
+                ref var src = ref modes[active.sourceInfo.modeInfoIdx].modeInfo.sourceMode;
+                src.width = savedSrc.width;
+                src.height = savedSrc.height;
+                src.position = savedSrc.position;
+                changed = true;
+            }
+
+            if (!changed) return true;
+
+            int result = SetDisplayConfig((uint)paths.Length, paths, (uint)modes.Length, modes,
+                SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE);
+            if (result != ERROR_SUCCESS)
+            {
+                error = DescribeError(result);
+                return false;
+            }
+            return true;
         }
 
-        private Dictionary<long, LUID> BuildAdapterMapping(DisplayConfigurationData saved, DISPLAYCONFIG_PATH_INFO[] currentPaths, int pathCount)
+        private sealed class CurrentTopology
         {
-            var mapping = new Dictionary<long, LUID>();
+            public Dictionary<string, LUID> AdapterPaths { get; } = new(StringComparer.OrdinalIgnoreCase);
+            public Dictionary<string, (LUID Adapter, uint TargetId)> Targets { get; } = new(StringComparer.OrdinalIgnoreCase);
+            public HashSet<LUID> AdaptersWithMonitors { get; } = new();
 
-            var currentAdapters = new HashSet<LUID>();
-            for (int i = 0; i < pathCount; i++)
+            public static CurrentTopology Build(DISPLAYCONFIG_PATH_INFO[] paths)
             {
-                currentAdapters.Add(currentPaths[i].sourceInfo.adapterId);
+                var topo = new CurrentTopology();
+                var cache = new Dictionary<LUID, string>();
+
+                foreach (var path in paths)
+                {
+                    foreach (var luid in new[] { path.sourceInfo.adapterId, path.targetInfo.adapterId })
+                    {
+                        var adapterPath = GetAdapterPath(luid, cache);
+                        if (!string.IsNullOrEmpty(adapterPath))
+                            topo.AdapterPaths.TryAdd(adapterPath, luid);
+                    }
+
+                    if (!path.targetInfo.targetAvailable) continue;
+
+                    var name = GetTargetName(path.targetInfo.adapterId, path.targetInfo.id);
+                    if (name?.monitorDevicePath is { Length: > 0 } devicePath)
+                    {
+                        topo.Targets.TryAdd(devicePath, (path.targetInfo.adapterId, path.targetInfo.id));
+                        topo.AdaptersWithMonitors.Add(path.targetInfo.adapterId);
+                    }
+                }
+
+                return topo;
             }
-
-            var savedAdapters = new HashSet<long>();
-            foreach (var path in saved.Paths)
-            {
-                savedAdapters.Add(path.SourceAdapterId);
-                savedAdapters.Add(path.TargetAdapterId);
-            }
-
-            var savedList = savedAdapters.OrderBy(a => a).ToList();
-            var currentList = currentAdapters.OrderBy(a => (long)a.HighPart << 32 | a.LowPart).ToList();
-
-            for (int i = 0; i < Math.Min(savedList.Count, currentList.Count); i++)
-            {
-                mapping[savedList[i]] = currentList[i];
-            }
-
-            return mapping;
         }
 
-        private LUID GetMappedAdapterId(long savedAdapterId, Dictionary<long, LUID> mapping)
-        {
-            if (mapping.TryGetValue(savedAdapterId, out var luid))
-            {
-                return luid;
-            }
+        #endregion
 
-            return new LUID
-            {
-                LowPart = (uint)(savedAdapterId & 0xFFFFFFFF),
-                HighPart = (int)(savedAdapterId >> 32)
-            };
-        }
+        #region Helpers
 
         public List<MonitorConfiguration> GetAllDisplays()
         {
             var monitors = new List<MonitorConfiguration>();
-
-            int result = GetDisplayConfigBufferSizes(QDC_ALL_PATHS, out uint pathCount, out uint modeCount);
-            if (result != ERROR_SUCCESS)
-            {
+            if (!TryQueryConfig(QDC_ALL_PATHS, out var paths, out _, out _))
                 return monitors;
-            }
 
-            var paths = new DISPLAYCONFIG_PATH_INFO[pathCount];
-            var modes = new DISPLAYCONFIG_MODE_INFO[modeCount];
-
-            result = QueryDisplayConfig(QDC_ALL_PATHS, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero);
-            if (result != ERROR_SUCCESS)
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in paths)
             {
-                return monitors;
-            }
+                if (!path.targetInfo.targetAvailable) continue;
 
-            var seen = new HashSet<string>();
-            for (int i = 0; i < pathCount; i++)
-            {
-                var path = paths[i];
+                var targetName = GetTargetName(path.targetInfo.adapterId, path.targetInfo.id);
+                string uniqueId = targetName?.monitorDevicePath is { Length: > 0 } dp
+                    ? dp
+                    : $"{LuidToLong(path.targetInfo.adapterId)}-{path.targetInfo.id}";
 
-                var targetName = new DISPLAYCONFIG_TARGET_DEVICE_NAME();
-                targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_TYPE.DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-                targetName.header.size = (uint)Marshal.SizeOf<DISPLAYCONFIG_TARGET_DEVICE_NAME>();
-                targetName.header.adapterId = path.targetInfo.adapterId;
-                targetName.header.id = path.targetInfo.id;
+                if (!seen.Add(uniqueId)) continue;
 
-                string uniqueId = $"{path.targetInfo.adapterId.LowPart}-{path.targetInfo.id}";
-
-                if (DisplayConfigGetDeviceInfo(ref targetName) == ERROR_SUCCESS)
-                {
-                    uniqueId = targetName.monitorDevicePath ?? uniqueId;
-                }
-
-                if (seen.Contains(uniqueId)) continue;
-                seen.Add(uniqueId);
-
-                var config = new MonitorConfiguration
+                monitors.Add(new MonitorConfiguration
                 {
                     TargetId = path.targetInfo.id,
                     IsEnabled = (path.flags & DISPLAYCONFIG_PATH_ACTIVE) != 0,
-                    FriendlyName = string.IsNullOrEmpty(targetName.monitorFriendlyDeviceName)
-                        ? $"Display {monitors.Count + 1}"
-                        : targetName.monitorFriendlyDeviceName,
-                    DevicePath = targetName.monitorDevicePath ?? string.Empty
-                };
-
-                monitors.Add(config);
+                    FriendlyName = targetName?.monitorFriendlyDeviceName is { Length: > 0 } fn ? fn : $"Display {monitors.Count + 1}",
+                    DevicePath = targetName?.monitorDevicePath ?? string.Empty
+                });
             }
 
             return monitors;
         }
+
+        /// <summary>Queries the display config, retrying if it changes between the size and query calls.</summary>
+        private static bool TryQueryConfig(uint flags, out DISPLAYCONFIG_PATH_INFO[] paths, out DISPLAYCONFIG_MODE_INFO[] modes, out int error)
+        {
+            paths = Array.Empty<DISPLAYCONFIG_PATH_INFO>();
+            modes = Array.Empty<DISPLAYCONFIG_MODE_INFO>();
+            error = ERROR_SUCCESS;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                error = GetDisplayConfigBufferSizes(flags, out uint pathCount, out uint modeCount);
+                if (error != ERROR_SUCCESS) return false;
+
+                var p = new DISPLAYCONFIG_PATH_INFO[pathCount];
+                var m = new DISPLAYCONFIG_MODE_INFO[modeCount];
+                error = QueryDisplayConfig(flags, ref pathCount, p, ref modeCount, m, IntPtr.Zero);
+
+                if (error == ERROR_INSUFFICIENT_BUFFER) continue;
+                if (error != ERROR_SUCCESS) return false;
+
+                paths = p.Take((int)pathCount).ToArray();
+                modes = m.Take((int)modeCount).ToArray();
+                return true;
+            }
+
+            return false;
+        }
+
+        private static DISPLAYCONFIG_TARGET_DEVICE_NAME? GetTargetName(LUID adapter, uint targetId)
+        {
+            var name = new DISPLAYCONFIG_TARGET_DEVICE_NAME();
+            name.header.type = DISPLAYCONFIG_DEVICE_INFO_TYPE.DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+            name.header.size = (uint)Marshal.SizeOf<DISPLAYCONFIG_TARGET_DEVICE_NAME>();
+            name.header.adapterId = adapter;
+            name.header.id = targetId;
+            return DisplayConfigGetDeviceInfo(ref name) == ERROR_SUCCESS ? name : null;
+        }
+
+        private static string? GetAdapterPath(LUID adapter, Dictionary<LUID, string> cache)
+        {
+            if (cache.TryGetValue(adapter, out var cached)) return cached;
+
+            var name = new DISPLAYCONFIG_ADAPTER_NAME();
+            name.header.type = DISPLAYCONFIG_DEVICE_INFO_TYPE.DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME;
+            name.header.size = (uint)Marshal.SizeOf<DISPLAYCONFIG_ADAPTER_NAME>();
+            name.header.adapterId = adapter;
+
+            if (DisplayConfigGetDeviceInfo(ref name) != ERROR_SUCCESS) return null;
+            cache[adapter] = name.adapterDevicePath ?? string.Empty;
+            return cache[adapter];
+        }
+
+        private static long LuidToLong(LUID luid) => ((long)luid.HighPart << 32) | luid.LowPart;
+
+        private static LUID LongToLuid(long value) => new()
+        {
+            LowPart = (uint)(value & 0xFFFFFFFF),
+            HighPart = (int)(value >> 32)
+        };
+
+        public static string DescribeError(int code) => code switch
+        {
+            ERROR_SUCCESS => "success",
+            ERROR_ACCESS_DENIED => "access denied — Windows blocks display changes from a locked, remote or secure-desktop session (error 5)",
+            ERROR_GEN_FAILURE => "general driver failure (error 31)",
+            ERROR_NOT_SUPPORTED => "not supported by the graphics driver (error 50)",
+            ERROR_INVALID_PARAMETER => "invalid configuration — a monitor, adapter or mode no longer matches (error 87)",
+            ERROR_INSUFFICIENT_BUFFER => "display configuration changed during the query (error 122)",
+            ERROR_BAD_CONFIGURATION => "no matching configuration in the Windows display database (error 1610)",
+            _ => $"error {code}"
+        };
+
+        #endregion
     }
 }

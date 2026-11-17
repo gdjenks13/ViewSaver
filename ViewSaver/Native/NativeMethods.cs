@@ -8,7 +8,14 @@ namespace ViewSaver.Native
         #region Constants
 
         public const int ERROR_SUCCESS = 0;
+        public const int ERROR_ACCESS_DENIED = 5;
+        public const int ERROR_GEN_FAILURE = 31;
+        public const int ERROR_NOT_SUPPORTED = 50;
+        public const int ERROR_INVALID_PARAMETER = 87;
         public const int ERROR_INSUFFICIENT_BUFFER = 122;
+        public const int ERROR_BAD_CONFIGURATION = 1610;
+
+        public const uint DISPLAYCONFIG_PATH_MODE_IDX_INVALID = 0xFFFFFFFF;
 
         public const uint QDC_ALL_PATHS = 0x00000001;
         public const uint QDC_ONLY_ACTIVE_PATHS = 0x00000002;

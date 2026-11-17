@@ -320,14 +320,20 @@ namespace ViewSaver.Forms
             var profile = _profileManager.GetProfile(profileId);
             if (profile == null) return;
 
-            bool success = _profileManager.ApplyProfile(profileId);
-            if (success)
+            UseWaitCursor = true;
+            var result = _profileManager.ApplyProfile(profileId);
+            UseWaitCursor = false;
+
+            if (result.Success)
             {
-                MessageBox.Show($"Profile '{profile.Name}' has been applied.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                var text = $"Profile '{profile.Name}' has been applied.";
+                if (!string.IsNullOrEmpty(result.Message)) text += "\n\n" + result.Message;
+                MessageBox.Show(text, "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
             {
-                MessageBox.Show($"Failed to apply profile '{profile.Name}'.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Failed to apply profile '{profile.Name}'.\n\n{result.Message}\n\nDetails: {Services.Logger.GetLogPath()}",
+                    "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
