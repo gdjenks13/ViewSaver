@@ -1,24 +1,32 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Reflection;
+using System.Windows.Forms;
 
 namespace ViewSaver.Helpers
 {
     public static class IconHelper
     {
-        private static Icon? _cachedIcon;
+        private static Icon? _appIcon;
+        private static Icon? _trayIcon;
 
-        public static Icon GetAppIcon()
+        /// <summary>Full multi-resolution icon (window title bars, taskbar, Alt+Tab).</summary>
+        public static Icon GetAppIcon() => _appIcon ??= LoadEmbeddedIcon(null) ?? CreateFallbackIcon();
+
+        /// <summary>Small-icon variant sized for the notification area at the current DPI.</summary>
+        public static Icon GetTrayIcon() => _trayIcon ??= LoadEmbeddedIcon(SystemInformation.SmallIconSize) ?? GetAppIcon();
+
+        private static Icon? LoadEmbeddedIcon(Size? size)
         {
-            if (_cachedIcon == null)
-            {
-                _cachedIcon = CreateAppIcon();
-            }
-            return _cachedIcon;
+            // Same .ico that is embedded as the exe's ApplicationIcon (Assets\ViewSaver.ico).
+            using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("ViewSaver.ico");
+            if (stream == null) return null;
+            return size is { } s ? new Icon(stream, s) : new Icon(stream);
         }
 
-        private static Icon CreateAppIcon()
+        private static Icon CreateFallbackIcon()
         {
-            var bitmap = new Bitmap(32, 32);
+            using var bitmap = new Bitmap(32, 32);
             using (var g = Graphics.FromImage(bitmap))
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;

@@ -36,7 +36,7 @@ namespace ViewSaver
 
             _trayIcon = new NotifyIcon
             {
-                Icon = IconHelper.GetAppIcon(),
+                Icon = IconHelper.GetTrayIcon(),
                 Text = "ViewSaver - Monitor Profile Manager",
                 ContextMenuStrip = _contextMenu,
                 Visible = true
@@ -80,6 +80,10 @@ namespace ViewSaver
             var manageItem = new ToolStripMenuItem("Manage Profiles...");
             manageItem.Click += OnManageProfilesClick;
             _contextMenu.Items.Add(manageItem);
+
+            var displaySettingsItem = new ToolStripMenuItem("Windows Display Settings...");
+            displaySettingsItem.Click += (_, _) => ShellHelper.OpenDisplaySettings();
+            _contextMenu.Items.Add(displaySettingsItem);
 
             _contextMenu.Items.Add(new ToolStripSeparator());
 
@@ -187,14 +191,8 @@ namespace ViewSaver
 
         private void OnAboutClick(object? sender, EventArgs e)
         {
-            MessageBox.Show(
-                "ViewSaver - Monitor Profile Manager\n\n" +
-                $"Version {Application.ProductVersion.Split('+')[0]}\n\n" +
-                "Save and quickly switch between different monitor configurations.",
-                "About ViewSaver",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information
-            );
+            using var form = new Forms.AboutForm();
+            form.ShowDialog();
         }
 
         private void OnExitClick(object? sender, EventArgs e)

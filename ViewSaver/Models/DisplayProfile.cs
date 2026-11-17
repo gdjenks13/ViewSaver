@@ -35,6 +35,25 @@ namespace ViewSaver.Models
         public uint TargetId { get; set; }
         public int DisplayOrder { get; set; }
 
+        /// <summary>
+        /// Windows display number taken from the GDI device name (\\.\DISPLAY3 → 3), falling back to
+        /// capture order. This is the number Windows uses for the device, shown in previews and details.
+        /// </summary>
+        [JsonIgnore]
+        public int DisplayNumber
+        {
+            get
+            {
+                const string prefix = @"\\.\DISPLAY";
+                if (DeviceName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+                    int.TryParse(DeviceName.AsSpan(prefix.Length), out int n))
+                {
+                    return n;
+                }
+                return DisplayOrder + 1;
+            }
+        }
+
         public override string ToString()
         {
             string status = IsEnabled ? (IsPrimary ? "Primary" : "Extended") : "Disabled";
@@ -156,5 +175,6 @@ namespace ViewSaver.Models
         public bool ShowNotifications { get; set; } = true;
         public bool MinimizeOnClose { get; set; } = true;
         public string LastSelectedProfileId { get; set; } = string.Empty;
+        public string LastExportDirectory { get; set; } = string.Empty;
     }
 }

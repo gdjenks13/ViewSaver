@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
 using System.Linq;
 using System.Windows.Forms;
+using ViewSaver.Controls;
 using ViewSaver.Helpers;
 using ViewSaver.Models;
 using ViewSaver.Services;
@@ -11,20 +14,21 @@ namespace ViewSaver.Forms
     public partial class ManageProfilesForm : Form
     {
         private readonly ProfileManager _profileManager;
+        private readonly ToolTip _toolTip = new();
         private ListView lstProfiles = null!;
         private Button btnApply = null!;
+        private Button btnEdit = null!;
         private Button btnRename = null!;
         private Button btnUpdate = null!;
         private Button btnHotkey = null!;
         private Button btnDelete = null!;
         private Button btnMoveUp = null!;
         private Button btnMoveDown = null!;
-        private Button btnClose = null!;
-        private Button btnNew = null!;
         private Button btnExport = null!;
-        private Button btnImport = null!;
         private RichTextBox txtDetails = null!;
-        private Label lblDetails = null!;
+        private MonitorLayoutPreview preview = null!;
+        private SplitContainer splitMain = null!;
+        private SplitContainer splitDetails = null!;
 
         public ManageProfilesForm(ProfileManager profileManager)
         {
@@ -36,195 +40,143 @@ namespace ViewSaver.Forms
         private void InitializeComponent()
         {
             Text = "Manage Profiles - ViewSaver";
-            Size = new Size(780, 520);
-            MinimumSize = new Size(650, 400);
+            Size = new Size(920, 700);
+            MinimumSize = new Size(720, 560);
             FormBorderStyle = FormBorderStyle.Sizable;
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = true;
             MinimizeBox = true;
             ShowInTaskbar = true;
             Icon = IconHelper.GetAppIcon();
+            AutoScaleMode = AutoScaleMode.Dpi;
+            Padding = new Padding(10);
 
-            const int padding = 15;
-            const int buttonWidth = 130;
-            const int buttonHeight = 30;
-
+            // ---- Left: profile list above a details/preview area; both splitters can be dragged ----
             lstProfiles = new ListView
             {
-                Location = new Point(padding, padding),
-                Size = new Size(400, 280),
+                Dock = DockStyle.Fill,
                 View = View.Details,
                 FullRowSelect = true,
                 MultiSelect = false,
                 GridLines = true,
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Bottom
+                HideSelection = false
             };
-            lstProfiles.Columns.Add("Name", 180);
-            lstProfiles.Columns.Add("Hotkey", 100);
-            lstProfiles.Columns.Add("Monitors", 60);
+            lstProfiles.Columns.Add("Name", 220);
+            lstProfiles.Columns.Add("Hotkey", 110);
+            lstProfiles.Columns.Add("Monitors", 70);
             lstProfiles.Columns.Add("Modified", 100);
             lstProfiles.SelectedIndexChanged += LstProfiles_SelectedIndexChanged;
             lstProfiles.DoubleClick += BtnApply_Click;
-            Controls.Add(lstProfiles);
-
-            lblDetails = new Label
-            {
-                Text = "Profile Details:",
-                Location = new Point(padding, 305),
-                Size = new Size(100, 20),
-                Anchor = AnchorStyles.Left | AnchorStyles.Bottom
-            };
-            Controls.Add(lblDetails);
 
             txtDetails = new RichTextBox
             {
-                Location = new Point(padding, 325),
-                Size = new Size(400, 120),
+                Dock = DockStyle.Fill,
                 ReadOnly = true,
                 BackColor = SystemColors.Window,
-                Anchor = AnchorStyles.Left | AnchorStyles.Bottom
+                BorderStyle = BorderStyle.FixedSingle,
+                DetectUrls = false
             };
-            Controls.Add(txtDetails);
 
-            int btnX = 450;
-            int btnY = padding;
-            int btnSpacing = 38;
+            preview = new MonitorLayoutPreview { Dock = DockStyle.Fill };
 
-            btnApply = new Button
+            splitDetails = new SplitContainer
             {
-                Text = "Apply Profile",
-                Location = new Point(btnX, btnY),
-                Size = new Size(buttonWidth, buttonHeight),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
+                Dock = DockStyle.Fill,
+                Orientation = Orientation.Vertical,
+                SplitterWidth = 6
             };
-            btnApply.Click += BtnApply_Click;
-            Controls.Add(btnApply);
+            splitDetails.Panel1.Controls.Add(txtDetails);
+            splitDetails.Panel1.Controls.Add(new Label { Text = "Profile Details:", Dock = DockStyle.Top, Height = 20 });
+            splitDetails.Panel2.Controls.Add(preview);
+            splitDetails.Panel2.Controls.Add(new Label { Text = "Layout Preview:", Dock = DockStyle.Top, Height = 20 });
 
-            btnY += btnSpacing;
-            btnRename = new Button
+            splitMain = new SplitContainer
             {
-                Text = "Rename",
-                Location = new Point(btnX, btnY),
-                Size = new Size(buttonWidth, buttonHeight),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
+                Dock = DockStyle.Fill,
+                Orientation = Orientation.Horizontal,
+                SplitterWidth = 6
             };
-            btnRename.Click += BtnRename_Click;
-            Controls.Add(btnRename);
+            splitMain.Panel1.Controls.Add(lstProfiles);
+            splitMain.Panel2.Controls.Add(splitDetails);
+            splitMain.Panel2.Padding = new Padding(0, 4, 0, 0);
 
-            btnY += btnSpacing;
-            btnUpdate = new Button
+            // ---- Right: buttons ----
+            var buttons = new FlowLayoutPanel
             {
-                Text = "Update Profile",
-                Location = new Point(btnX, btnY),
-                Size = new Size(buttonWidth, buttonHeight),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
+                Dock = DockStyle.Right,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                AutoScroll = true,
+                Width = 170,
+                Padding = new Padding(10, 0, 0, 0)
             };
-            btnUpdate.Click += BtnUpdate_Click;
-            Controls.Add(btnUpdate);
 
-            btnY += btnSpacing;
-            btnHotkey = new Button
+            Button Add(string text, EventHandler onClick, string tooltip, bool gapBefore = false)
             {
-                Text = "Set Hotkey...",
-                Location = new Point(btnX, btnY),
-                Size = new Size(buttonWidth, buttonHeight),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
-            };
-            btnHotkey.Click += BtnHotkey_Click;
-            Controls.Add(btnHotkey);
+                var b = new Button { Text = text, Size = new Size(145, 28), Margin = new Padding(0, gapBefore ? 12 : 2, 0, 2) };
+                b.Click += onClick;
+                _toolTip.SetToolTip(b, tooltip);
+                buttons.Controls.Add(b);
+                return b;
+            }
 
-            btnY += btnSpacing;
-            btnDelete = new Button
+            btnApply = Add("Apply Profile", BtnApply_Click, "Switch your displays to the selected profile.");
+            btnEdit = Add("Edit Layout...", BtnEdit_Click, "Fine-tune monitor positions for the selected profile.");
+            btnRename = Add("Rename...", BtnRename_Click, "Rename the selected profile.");
+            btnUpdate = Add("Update Profile", BtnUpdate_Click, "Replace the selected profile with your current display setup.");
+            btnHotkey = Add("Set Hotkey...", BtnHotkey_Click, "Assign a keyboard shortcut to the selected profile.");
+            btnDelete = Add("Delete", BtnDelete_Click, "Delete the selected profile.");
+
+            btnMoveUp = Add("Move Up", BtnMoveUp_Click, "Move the profile up in the tray menu.", gapBefore: true);
+            btnMoveDown = Add("Move Down", BtnMoveDown_Click, "Move the profile down in the tray menu.");
+
+            Add("Save Current...", BtnNew_Click, "Save your current display setup as a new profile.", gapBefore: true);
+            Add("Display Settings...", (_, _) => ShellHelper.OpenDisplaySettings(),
+                "Open Windows Settings > System > Display to arrange your monitors before saving.");
+
+            btnExport = Add("Export Profile...", BtnExport_Click, "Save the selected profile to its own .json file.", gapBefore: true);
+            Add("Import Profile...", BtnImport_Click, "Add profile(s) from .json files to your list.");
+            Add("Backup All...", BtnBackup_Click, "Save all of your profiles to one backup file.", gapBefore: true);
+            Add("Restore Backup...", BtnRestore_Click, "Replace or merge your profiles from a backup file.");
+
+            var bottom = new FlowLayoutPanel
             {
-                Text = "Delete",
-                Location = new Point(btnX, btnY),
-                Size = new Size(buttonWidth, buttonHeight),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
+                Dock = DockStyle.Bottom,
+                FlowDirection = FlowDirection.RightToLeft,
+                AutoSize = true,
+                Padding = new Padding(0, 8, 0, 0)
             };
-            btnDelete.Click += BtnDelete_Click;
-            Controls.Add(btnDelete);
+            var btnClose = new Button { Text = "Close", Size = new Size(145, 30), DialogResult = DialogResult.OK, Margin = new Padding(0) };
+            bottom.Controls.Add(btnClose);
+            CancelButton = btnClose;
 
-            btnY += btnSpacing + 20;
-            btnMoveUp = new Button
+            Controls.Add(splitMain);
+            Controls.Add(buttons);
+            Controls.Add(bottom);
+
+            Shown += (_, _) =>
             {
-                Text = "Move Up",
-                Location = new Point(btnX, btnY),
-                Size = new Size(buttonWidth, buttonHeight),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
+                splitMain.SplitterDistance = Math.Max(120, (int)(splitMain.Height * 0.42));
+                splitDetails.SplitterDistance = Math.Max(150, (int)(splitDetails.Width * 0.45));
+                SelectProfile(_profileManager.Settings.LastSelectedProfileId);
             };
-            btnMoveUp.Click += BtnMoveUp_Click;
-            Controls.Add(btnMoveUp);
-
-            btnY += btnSpacing;
-            btnMoveDown = new Button
-            {
-                Text = "Move Down",
-                Location = new Point(btnX, btnY),
-                Size = new Size(buttonWidth, buttonHeight),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
-            };
-            btnMoveDown.Click += BtnMoveDown_Click;
-            Controls.Add(btnMoveDown);
-
-            btnY += btnSpacing + 20;
-            btnNew = new Button
-            {
-                Text = "Save Current...",
-                Location = new Point(btnX, btnY),
-                Size = new Size(buttonWidth, buttonHeight),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
-            };
-            btnNew.Click += BtnNew_Click;
-            Controls.Add(btnNew);
-
-            btnClose = new Button
-            {
-                Text = "Close",
-                Location = new Point(btnX, 410),
-                Size = new Size(buttonWidth, buttonHeight),
-                DialogResult = DialogResult.OK,
-                Anchor = AnchorStyles.Bottom | AnchorStyles.Right
-            };
-            Controls.Add(btnClose);
-
-            btnExport = new Button
-            {
-                Text = "Export...",
-                Location = new Point(585, padding),
-                Size = new Size(80, buttonHeight),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
-            };
-            btnExport.Click += BtnExport_Click;
-            Controls.Add(btnExport);
-
-            btnImport = new Button
-            {
-                Text = "Import...",
-                Location = new Point(675, padding),
-                Size = new Size(80, buttonHeight),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
-            };
-            btnImport.Click += BtnImport_Click;
-            Controls.Add(btnImport);
-
-            Resize += OnFormResize;
 
             UpdateButtonStates();
         }
 
-        private void OnFormResize(object? sender, EventArgs e)
+        private void SelectProfile(string? profileId)
         {
-            int availableWidth = btnApply.Left - 30; // Space before buttons minus padding
-            if (availableWidth > 200)
+            foreach (ListViewItem item in lstProfiles.Items)
             {
-                lstProfiles.Width = availableWidth;
-                txtDetails.Width = availableWidth;
+                if (item.Tag as string == profileId)
+                {
+                    item.Selected = true;
+                    item.Focused = true;
+                    item.EnsureVisible();
+                    return;
+                }
             }
-
-            int detailsTop = lstProfiles.Bottom + 10;
-            lblDetails.Top = detailsTop;
-            txtDetails.Top = detailsTop + 20;
-            txtDetails.Height = ClientSize.Height - txtDetails.Top - 35;
+            if (lstProfiles.Items.Count > 0) lstProfiles.Items[0].Selected = true;
         }
 
         private void LoadProfiles()
@@ -251,6 +203,8 @@ namespace ViewSaver.Forms
         {
             bool hasSelection = lstProfiles.SelectedItems.Count > 0;
             btnApply.Enabled = hasSelection;
+            btnEdit.Enabled = hasSelection;
+            btnExport.Enabled = hasSelection;
             btnRename.Enabled = hasSelection;
             btnUpdate.Enabled = hasSelection;
             btnHotkey.Enabled = hasSelection;
@@ -265,8 +219,11 @@ namespace ViewSaver.Forms
             if (profile == null)
             {
                 txtDetails.Clear();
+                preview.Monitors = Array.Empty<MonitorConfiguration>();
                 return;
             }
+
+            preview.Monitors = profile.Monitors;
 
             txtDetails.Clear();
             txtDetails.SelectionFont = new Font(txtDetails.Font, FontStyle.Bold);
@@ -280,11 +237,14 @@ namespace ViewSaver.Forms
             txtDetails.AppendText("Monitors:\n");
             txtDetails.SelectionFont = txtDetails.Font;
 
-            foreach (var monitor in profile.Monitors.OrderBy(m => m.DisplayOrder))
+            foreach (var monitor in profile.Monitors.OrderBy(m => m.DisplayNumber))
             {
                 string primary = monitor.IsPrimary ? " [Primary]" : "";
                 string enabled = monitor.IsEnabled ? "" : " [Disabled]";
-                txtDetails.AppendText($"  • {monitor.FriendlyName}{primary}{enabled}\n");
+                txtDetails.SelectionFont = new Font(txtDetails.Font, FontStyle.Bold);
+                txtDetails.AppendText($"  {monitor.DisplayNumber}. ");
+                txtDetails.SelectionFont = txtDetails.Font;
+                txtDetails.AppendText($"{monitor.FriendlyName}{primary}{enabled}\n");
                 txtDetails.AppendText($"    {monitor.Width}x{monitor.Height} @ {monitor.RefreshRate}Hz\n");
                 txtDetails.AppendText($"    Position: ({monitor.PositionX}, {monitor.PositionY})\n");
             }
@@ -309,6 +269,7 @@ namespace ViewSaver.Forms
             else
             {
                 txtDetails.Clear();
+                preview.Monitors = Array.Empty<MonitorConfiguration>();
             }
         }
 
@@ -419,6 +380,7 @@ namespace ViewSaver.Forms
                 _profileManager.DeleteProfile(profileId);
                 LoadProfiles();
                 txtDetails.Clear();
+                preview.Monitors = Array.Empty<MonitorConfiguration>();
             }
         }
 
@@ -460,26 +422,47 @@ namespace ViewSaver.Forms
             }
         }
 
+        private void BtnEdit_Click(object? sender, EventArgs e)
+        {
+            var profileId = GetSelectedProfileId();
+            var profile = profileId == null ? null : _profileManager.GetProfile(profileId);
+            if (profile == null) return;
+
+            using var dialog = new EditProfileDialog(_profileManager, profile);
+            if (dialog.ShowDialog(this) == DialogResult.OK)
+            {
+                LoadProfiles();
+                SelectProfile(profileId);
+            }
+        }
+
         private void BtnExport_Click(object? sender, EventArgs e)
         {
+            var profileId = GetSelectedProfileId();
+            var profile = profileId == null ? null : _profileManager.GetProfile(profileId);
+            if (profile == null) return;
+
+            string directory = GetExportDirectory();
             using var dialog = new SaveFileDialog
             {
-                Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
+                Title = $"Export Profile '{profile.Name}'",
+                Filter = JsonFilter,
                 DefaultExt = "json",
-                FileName = "viewsaver-profiles.json"
+                InitialDirectory = directory,
+                FileName = SuggestFileName(directory, profile.Name)
             };
 
-            if (dialog.ShowDialog() == DialogResult.OK)
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            try
             {
-                try
-                {
-                    _profileManager.ExportProfiles(dialog.FileName);
-                    MessageBox.Show("Profiles exported successfully.", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Export failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
+                _profileManager.ExportProfile(profile.Id, dialog.FileName);
+                RememberExportDirectory(dialog.FileName);
+                MessageBox.Show(this, $"Profile '{profile.Name}' exported to:\n{dialog.FileName}", "Export Profile", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Export failed", ex);
+                MessageBox.Show(this, $"Export failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -487,23 +470,138 @@ namespace ViewSaver.Forms
         {
             using var dialog = new OpenFileDialog
             {
-                Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
-                DefaultExt = "json"
+                Title = "Import Profile(s)",
+                Filter = JsonFilter,
+                DefaultExt = "json",
+                InitialDirectory = GetExportDirectory(),
+                Multiselect = true
             };
 
-            if (dialog.ShowDialog() == DialogResult.OK)
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+            int total = 0;
+            var errors = new List<string>();
+            foreach (var file in dialog.FileNames)
             {
                 try
                 {
-                    int count = _profileManager.ImportProfiles(dialog.FileName);
-                    LoadProfiles();
-                    MessageBox.Show($"Imported {count} profile(s).", "Import", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    total += _profileManager.ImportProfiles(file);
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show($"Import failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Logger.Error($"Import of {file} failed", ex);
+                    errors.Add($"{Path.GetFileName(file)}: {ex.Message}");
                 }
             }
+
+            RememberExportDirectory(dialog.FileNames[0]);
+            LoadProfiles();
+            if (total > 0 && lstProfiles.Items.Count > 0)
+                lstProfiles.Items[^1].Selected = true;
+
+            var message = $"Imported {total} profile(s) and added them to the end of your list.";
+            if (errors.Count > 0) message += "\n\nSome files could not be imported:\n" + string.Join("\n", errors);
+            MessageBox.Show(this, message, "Import Profile", MessageBoxButtons.OK,
+                errors.Count > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+        }
+
+        private void BtnBackup_Click(object? sender, EventArgs e)
+        {
+            if (_profileManager.Profiles.Count == 0)
+            {
+                MessageBox.Show(this, "There are no profiles to back up.", "Backup All", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string directory = GetExportDirectory();
+            using var dialog = new SaveFileDialog
+            {
+                Title = "Back Up All Profiles",
+                Filter = JsonFilter,
+                DefaultExt = "json",
+                InitialDirectory = directory,
+                FileName = SuggestFileName(directory, $"ViewSaver Backup {DateTime.Now:yyyy-MM-dd}")
+            };
+
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            try
+            {
+                _profileManager.BackupProfiles(dialog.FileName);
+                RememberExportDirectory(dialog.FileName);
+                MessageBox.Show(this, $"All {_profileManager.Profiles.Count} profile(s) backed up to:\n{dialog.FileName}", "Backup All", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Backup failed", ex);
+                MessageBox.Show(this, $"Backup failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void BtnRestore_Click(object? sender, EventArgs e)
+        {
+            using var dialog = new OpenFileDialog
+            {
+                Title = "Restore Profiles from Backup",
+                Filter = JsonFilter,
+                DefaultExt = "json",
+                InitialDirectory = GetExportDirectory()
+            };
+
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+            var choice = _profileManager.Profiles.Count == 0
+                ? DialogResult.Yes
+                : MessageBox.Show(this,
+                    "Replace your existing profiles with the backup?\n\n" +
+                    "Yes = replace all current profiles\nNo = keep current profiles and add the backup's profiles\nCancel = do nothing",
+                    "Restore Backup", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+            if (choice == DialogResult.Cancel) return;
+
+            try
+            {
+                int count = choice == DialogResult.Yes
+                    ? _profileManager.RestoreProfiles(dialog.FileName)
+                    : _profileManager.ImportProfiles(dialog.FileName);
+                RememberExportDirectory(dialog.FileName);
+                LoadProfiles();
+                MessageBox.Show(this, $"Restored {count} profile(s).", "Restore Backup", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Restore failed", ex);
+                MessageBox.Show(this, $"Restore failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private const string JsonFilter = "ViewSaver profiles (*.json)|*.json|All files (*.*)|*.*";
+
+        private string GetExportDirectory()
+        {
+            var dir = _profileManager.Settings.LastExportDirectory;
+            return !string.IsNullOrEmpty(dir) && Directory.Exists(dir)
+                ? dir
+                : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        }
+
+        private void RememberExportDirectory(string filePath)
+        {
+            var dir = Path.GetDirectoryName(filePath);
+            if (string.IsNullOrEmpty(dir) || dir == _profileManager.Settings.LastExportDirectory) return;
+            _profileManager.Settings.LastExportDirectory = dir;
+            _profileManager.SaveSettings();
+        }
+
+        /// <summary>"Main Office.json", or "Main Office (rev 2).json" etc. if that file already exists.</summary>
+        private static string SuggestFileName(string directory, string name)
+        {
+            var invalid = Path.GetInvalidFileNameChars();
+            var safe = new string(name.Select(c => invalid.Contains(c) ? '_' : c).ToArray()).Trim().TrimEnd('.');
+            if (string.IsNullOrEmpty(safe)) safe = "ViewSaver Profile";
+
+            var candidate = $"{safe}.json";
+            for (int rev = 2; File.Exists(Path.Combine(directory, candidate)); rev++)
+                candidate = $"{safe} (rev {rev}).json";
+            return candidate;
         }
 
         #endregion

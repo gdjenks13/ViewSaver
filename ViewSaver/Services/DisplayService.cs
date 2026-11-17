@@ -283,6 +283,33 @@ namespace ViewSaver.Services
             }
         }
 
+        /// <summary>Asks Windows whether the profile could be applied right now, without changing anything.</summary>
+        public ApplyResult ValidateProfile(DisplayProfile profile)
+        {
+            if (profile.RawConfiguration == null || profile.RawConfiguration.Paths.Count == 0)
+                return ApplyResult.Fail("The profile contains no display data.");
+
+            try
+            {
+                if (!TryQueryConfig(QDC_ALL_PATHS, out var currentPaths, out _, out int error))
+                    return ApplyResult.Fail($"Could not read the current display configuration ({DescribeError(error)}).");
+
+                if (!TryBuildConfig(profile, CurrentTopology.Build(currentPaths), out var paths, out var modes, out string buildError))
+                    return ApplyResult.Fail(buildError);
+
+                int result = SetDisplayConfig((uint)paths.Length, paths, (uint)modes.Length, modes,
+                    SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
+                return result == ERROR_SUCCESS
+                    ? ApplyResult.Ok()
+                    : ApplyResult.Fail($"Windows would reject this layout ({DescribeError(result)}).");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Unexpected error validating '{profile.Name}'", ex);
+                return ApplyResult.Fail($"Unexpected error: {ex.Message}");
+            }
+        }
+
         private static ApplyResult Fail(DisplayProfile profile, string message)
         {
             Logger.Error($"Failed to apply '{profile.Name}': {message}");

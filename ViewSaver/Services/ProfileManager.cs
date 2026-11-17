@@ -249,36 +249,128 @@ namespace ViewSaver.Services
             }
         }
 
-        public void ExportProfiles(string filePath)
+        #region Export / Import (single profiles) and Backup / Restore (all profiles)
+
+        /// <summary>Exports one profile to its own file.</summary>
+        public void ExportProfile(string profileId, string filePath)
         {
-            var json = JsonConvert.SerializeObject(_profiles, Formatting.Indented);
-            File.WriteAllText(filePath, json);
+            var profile = GetProfile(profileId) ?? throw new InvalidOperationException("Profile not found.");
+            WriteAtomic(filePath, JsonConvert.SerializeObject(profile, Formatting.Indented));
         }
 
-        public int ImportProfiles(string filePath, bool replaceExisting = false)
+        /// <summary>Writes every profile to a single backup file.</summary>
+        public void BackupProfiles(string filePath)
         {
-            var json = File.ReadAllText(filePath);
-            var importedProfiles = JsonConvert.DeserializeObject<List<DisplayProfile>>(json);
+            WriteAtomic(filePath, JsonConvert.SerializeObject(_profiles, Formatting.Indented));
+        }
 
-            if (importedProfiles == null) return 0;
-
-            if (replaceExisting)
+        /// <summary>
+        /// Adds the profile(s) in a file to the current list. Accepts a single exported profile or a backup.
+        /// Imported profiles get new IDs, unique names, and drop hotkeys that are already in use.
+        /// </summary>
+        public int ImportProfiles(string filePath)
+        {
+            var imported = ReadProfilesFile(filePath);
+            foreach (var profile in imported)
             {
-                _profiles = importedProfiles;
-            }
-            else
-            {
-                // Generate new IDs to avoid conflicts
-                foreach (var profile in importedProfiles)
+                profile.Id = Guid.NewGuid().ToString();
+                profile.Name = MakeUniqueName(profile.Name);
+                if (profile.Hotkey != null && _profiles.Any(p => profile.Hotkey.Equals(p.Hotkey)))
                 {
-                    profile.Id = Guid.NewGuid().ToString();
-                    _profiles.Add(profile);
+                    Logger.Info($"Cleared hotkey {profile.Hotkey} on imported '{profile.Name}' (already in use).");
+                    profile.Hotkey = null;
                 }
+                _profiles.Add(profile);
             }
 
             SaveProfiles();
             ProfilesChanged?.Invoke(this, EventArgs.Empty);
-            return importedProfiles.Count;
+            return imported.Count;
         }
+
+        /// <summary>Replaces all profiles with the contents of a backup file.</summary>
+        public int RestoreProfiles(string filePath)
+        {
+            var restored = ReadProfilesFile(filePath);
+            _profiles = restored;
+            SaveProfiles();
+            ProfilesChanged?.Invoke(this, EventArgs.Empty);
+            return restored.Count;
+        }
+
+        private static List<DisplayProfile> ReadProfilesFile(string filePath)
+        {
+            var json = File.ReadAllText(filePath).TrimStart();
+            List<DisplayProfile>? profiles = json.StartsWith('[')
+                ? JsonConvert.DeserializeObject<List<DisplayProfile>>(json)
+                : JsonConvert.DeserializeObject<DisplayProfile>(json) is { } single ? new List<DisplayProfile> { single } : null;
+
+            profiles?.RemoveAll(p => p == null);
+            if (profiles == null || profiles.Count == 0)
+                throw new InvalidDataException("The file does not contain any ViewSaver profiles.");
+            return profiles;
+        }
+
+        private string MakeUniqueName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) name = "Imported Profile";
+            if (!_profiles.Any(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) return name;
+
+            for (int i = 2; ; i++)
+            {
+                var candidate = $"{name} ({i})";
+                if (!_profiles.Any(p => p.Name.Equals(candidate, StringComparison.OrdinalIgnoreCase)))
+                    return candidate;
+            }
+        }
+
+        #endregion
+
+        /// <summary>Saves hand-edited monitor positions to a profile.</summary>
+        public void UpdateMonitorPositions(string profileId, IReadOnlyList<(int X, int Y)> positions)
+        {
+            var profile = GetProfile(profileId) ?? throw new InvalidOperationException("Profile not found.");
+            SetMonitorPositions(profile, positions);
+            profile.ModifiedAt = DateTime.Now;
+            SaveProfiles();
+            ProfilesChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// Sets monitor positions on a profile, keeping the raw configuration used by SetDisplayConfig in sync.
+        /// </summary>
+        public static void SetMonitorPositions(DisplayProfile profile, IReadOnlyList<(int X, int Y)> positions)
+        {
+            if (positions.Count != profile.Monitors.Count)
+                throw new ArgumentException("Position count does not match monitor count.", nameof(positions));
+
+            var raw = profile.RawConfiguration;
+            bool aligned = raw != null && raw.Paths.Count == profile.Monitors.Count;
+
+            for (int i = 0; i < positions.Count; i++)
+            {
+                profile.Monitors[i].PositionX = positions[i].X;
+                profile.Monitors[i].PositionY = positions[i].Y;
+
+                if (aligned)
+                {
+                    int modeIdx = (int)raw!.Paths[i].SourceModeInfoIdx;
+                    if (modeIdx >= 0 && modeIdx < raw.Modes.Count)
+                    {
+                        raw.Modes[modeIdx].PositionX = positions[i].X;
+                        raw.Modes[modeIdx].PositionY = positions[i].Y;
+                    }
+                }
+            }
+
+            // Windows treats the display at (0,0) as primary.
+            foreach (var m in profile.Monitors)
+                m.IsPrimary = m.IsEnabled && m.PositionX == 0 && m.PositionY == 0;
+        }
+
+        public static DisplayProfile Clone(DisplayProfile profile) =>
+            JsonConvert.DeserializeObject<DisplayProfile>(JsonConvert.SerializeObject(profile))!;
+
+        public ApplyResult ValidateProfile(DisplayProfile profile) => _displayService.ValidateProfile(profile);
     }
 }
